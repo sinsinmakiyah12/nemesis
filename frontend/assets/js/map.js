@@ -56,6 +56,33 @@ window.AuditMap = (() => {
     return hasCoords ? [[minLng, minLat], [maxLng, maxLat]] : null;
   }
 
+  function fitBounds(geo, featureKey) {
+    if (!geo || !Array.isArray(geo.features) || !geo.features.length || !map) {
+      return;
+    }
+
+    const features = featureKey
+      ? geo.features.filter((feature) => {
+          if (!feature.properties) return false;
+          return getFeatureAreaKey(feature.properties) === featureKey;
+        })
+      : geo.features;
+
+    if (!features.length) {
+      return;
+    }
+
+    const bounds = computeBounds({ type: "FeatureCollection", features });
+    if (!bounds) {
+      return;
+    }
+
+    map.fitBounds(bounds, {
+      padding: featureKey ? 80 : 50,
+      duration: 300,
+    });
+  }
+
   function ensureMap(container) {
     if (map) return;
     map = new maplibregl.Map({
@@ -233,5 +260,5 @@ window.AuditMap = (() => {
     map.getSource(SOURCE).setData(buildStyledGeo(geo, getFeatureStyle));
   }
 
-  return { render, refresh, closePopup: clearHover };
+  return { render, refresh, fitBounds, closePopup: clearHover };
 })();

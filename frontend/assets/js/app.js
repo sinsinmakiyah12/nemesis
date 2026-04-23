@@ -313,6 +313,19 @@
     return isProvinceView() ? dashboardData.provinceView.geo : dashboardData.geo;
   }
 
+  function getMapGeo() {
+    const geo = getActiveGeo();
+    if (!state.selectedAreaKey || !geo || !Array.isArray(geo.features)) {
+      return geo;
+    }
+
+    const filtered = geo.features.filter((feature) => getFeatureAreaKey(feature) === state.selectedAreaKey);
+    return {
+      type: "FeatureCollection",
+      features: filtered,
+    };
+  }
+
   function getActiveLegend() {
     return isProvinceView() ? dashboardData.provinceView.legend : dashboardData.legend;
   }
@@ -459,6 +472,10 @@
       return false;
     }
 
+    if (state.selectedAreaKey) {
+      return getAreaKey(area) === state.selectedAreaKey;
+    }
+
     if (isProvinceView()) {
       return area.totalPackages > 0;
     }
@@ -476,6 +493,15 @@
     }
 
     return true;
+  }
+
+  function fitMapToArea(areaKey) {
+    if (!areaKey || typeof AuditMap.fitBounds !== "function") {
+      return;
+    }
+
+    const geo = getMapGeo();
+    AuditMap.fitBounds(geo, areaKey);
   }
 
   function getFilteredAreasForSidebar() {
@@ -747,11 +773,11 @@
     const area = getActiveAreaByKey(areaKey);
     const visible = areaMatchesCurrentView(area);
     const selected = state.selectedAreaKey === areaKey;
-    const strokeOpacity = (selected ? 1 : 0.2) * (visible ? 0.85 : 0.2);
+    const strokeOpacity = selected ? 1 : visible ? 0.17 : 0;
 
     return {
       fillColor: area ? getLegendColor(area.totalPotentialWaste) : "#243155",
-      fillOpacity: selected ? 0.72 : visible ? 0.52 : 0.08,
+      fillOpacity: selected ? 0.72 : visible ? 0.52 : 0,
       strokeColor: selected ? "#f0d8a8" : "#b5a882",
       strokeWidth: selected ? 2.1 : 0.8,
       strokeOpacity,
@@ -821,7 +847,7 @@
   }
 
   function renderGeoLayer(fitToBounds) {
-    const geo = getActiveGeo();
+    const geo = getMapGeo();
 
     if (!geo || !Array.isArray(geo.features) || !geo.features.length) {
       setMapStatus("Tidak ada geometri untuk mode peta saat ini.", true);
@@ -847,7 +873,7 @@
   }
 
   function refreshMapStyles() {
-    AuditMap.refresh(getActiveGeo(), featureStyle);
+    AuditMap.refresh(getMapGeo(), featureStyle);
   }
 
   function renderPackageTableRows(items) {
@@ -1112,6 +1138,306 @@
     renderRegionModalContent(payload);
   }
 
+  function renderDashboardCharts(dashboardData) {
+    const ownerData = dashboardData.ownerBreakdown || [];
+    const severityData = dashboardData.severityBreakdown || [];
+    const topPkgs = dashboardData.topPackages || [];
+    const anomalies = dashboardData.anomalies || [];
+
+    const ownerLabels = ownerData.map(d => d.ownerType === 'central' ? 'K/L' : d.ownerType === 'provinsi' ? 'Pemprov' : d.ownerType === 'kabkota' ? 'Pemkot' : 'Others');
+    const ownerCounts = ownerData.map(d => d.count);
+    const ownerWaste = ownerData.map(d => d.waste);
+
+    const severityLabels = severityData.map(d => severityLabel(d.severity));
+    const severityCounts = severityData.map(d => d.count);
+
+    let anomalyAlerts = '';
+    if (anomalies.length > 0) {
+      anomalyAlerts = `
+        <div class="anomaly-alerts">
+          <h4 style="color:#d4a999;margin-bottom:10px">🚨 Deteksi ${anomalies.length} Anomali</h4>
+          ${anomalies.slice(0, 5).map(a => {
+            const anomalyLabel = a.anomalyType === 'severity_high' ? 'Severity Tinggi' : 
+                                a.anomalyType === 'flagged' ? 'Flagged/Mencurigakan' : 
+                                a.anomalyType === 'high_waste_ratio' ? 'Ratio Waste Tinggi' : 'Anomali';
+            return `
+              <div style="background:rgba(212,169,153,.1);border-left:3px solid #d4a999;padding:8px;margin-bottom:6px;border-radius:4px">
+                <div style="font-size:0.85em;color:#d4a999;font-weight:bold">${anomalyLabel}</div>
+                <div style="font-size:0.8em;color:#b5a882">${escapeHtml(a.packageName)}</div>
+                <div style="font-size:0.75em;color:#8b7332">Waste: Rp ${formatCompactCurrency(a.audit.potensiPemborosan)}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    dom.modalBody.innerHTML = `
+      ${anomalyAlerts}
+      <div class="dashboard-grid">
+        <div class="dashboard-chart">
+          <h4>Breakdown Pemilik (Jumlah Paket)</h4>
+          <canvas id="ownerChart"></canvas>
+        </div>
+        <div class="dashboard-chart">
+          <h4>Breakdown Severity</h4>
+          <canvas id="severityChart"></canvas>
+        </div>
+        <div class="dashboard-waste">
+          <h4>Potensi Pemborosan per Pemilik</h4>
+          <div style="max-height:250px;overflow-y:auto">
+            ${ownerData.map((d, i) => `
+              <div style="display:flex;justify-content:space-between;padding:8px;border-bottom:1px solid #334;font-size:0.9em">
+                <span>${ownerLabels[i]}</span>
+                <span style="color:#d4a999;font-weight:bold">Rp ${formatCompactCurrency(d.waste)}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="dashboard-top-packages">
+        <h4>Top 10 Paket Terbesar Potensi Pemborosan</h4>
+        <table class="rtbl" style="font-size:0.85em"><thead><tr><th>Paket</th><th>Pemilik</th><th>Potensi Pemborosan</th></tr></thead><tbody>
+          ${topPkgs.slice(0, 10).map(pkg => `
+            <tr>
+              <td>${escapeHtml(pkg.packageName)}</td>
+              <td>${escapeHtml(ownerTypeLabel(pkg.ownerType))}</td>
+              <td style="color:#d4a999">${formatCompactCurrency(pkg.audit.potensiPemborosan)}</td>
+            </tr>
+          `).join('')}
+        </tbody></table>
+      </div>
+    `;
+
+    setTimeout(() => {
+      const ctx1 = document.getElementById('ownerChart');
+      const ctx2 = document.getElementById('severityChart');
+      if (ctx1) {
+        new Chart(ctx1, {
+          type: 'doughnut',
+          data: {
+            labels: ownerLabels,
+            datasets: [{
+              data: ownerCounts,
+              backgroundColor: ['#7b86a3', '#b5a882', '#d4a999', '#8b7332'],
+              borderColor: '#1a2a4a',
+              borderWidth: 1
+            }]
+          },
+          options: { responsive: true, maintainAspectRatio: true }
+        });
+      }
+      if (ctx2) {
+        new Chart(ctx2, {
+          type: 'doughnut',
+          data: {
+            labels: severityLabels,
+            datasets: [{
+              data: severityCounts,
+              backgroundColor: ['#7b86a3', '#8b7332', '#a83c2e', '#d4a999'],
+              borderColor: '#1a2a4a',
+              borderWidth: 1
+            }]
+          },
+          options: { responsive: true, maintainAspectRatio: true }
+        });
+      }
+    }, 100);
+  }
+
+  function renderUMKMTab(dashboardData) {
+    const umkmPotentials = dashboardData.umkmPotentials || [];
+
+    let html = `<div style="padding:0">`;
+    
+    if (umkmPotentials.length === 0) {
+      html += `<div class="panel-msg" style="min-height:200px">Tidak ada data potensi UMKM tersedia.</div>`;
+    } else {
+      html += `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:16px">
+      `;
+      
+      umkmPotentials.forEach(umkm => {
+        const scoreColor = umkm.score >= 7.5 ? '#d4a999' : umkm.score >= 6 ? '#b5a882' : '#8b7332';
+        const statusBg = umkm.status === 'Tinggi' ? 'rgba(212,169,153,.15)' : 'rgba(181,168,130,.15)';
+        const statusColor = umkm.status === 'Tinggi' ? '#d4a999' : '#b5a882';
+        
+        html += `
+          <div style="background:var(--b2);border:1px solid var(--bd);border-radius:10px;padding:14px;transition:all .2s;cursor:pointer" onmouseover="this.style.borderColor='#b5a882';this.style.background='#243155'" onmouseout="this.style.borderColor='#2a3a5e';this.style.background='#1c2847'">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+              <h4 style="font-size:12px;font-weight:700;color:var(--t1);flex:1">${escapeHtml(umkm.category)}</h4>
+              <div style="background:${statusBg};color:${statusColor};padding:2px 8px;border-radius:4px;font-size:0.75em;font-weight:700;white-space:nowrap;margin-left:8px">${umkm.status}</div>
+            </div>
+            
+            <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:12px">
+              <div style="font-size:13px;font-weight:700;color:${scoreColor};font-family:'JetBrains Mono',monospace">${umkm.score}</div>
+              <div style="font-size:9px;color:var(--t3)">/10 Score</div>
+            </div>
+            
+            <div style="background:rgba(181,168,130,.08);border-radius:6px;padding:8px;margin-bottom:10px">
+              <div style="font-size:9px;color:var(--t3);margin-bottom:3px">Potensi Pasar</div>
+              <div style="font-size:12px;font-weight:700;color:var(--sage);font-family:'JetBrains Mono',monospace">${umkm.potential}</div>
+            </div>
+            
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:9.5px">
+              <div style="background:rgba(123,134,163,.1);border-radius:4px;padding:6px;text-align:center">
+                <div style="color:var(--t3);margin-bottom:2px">Usaha</div>
+                <div style="font-weight:700;color:var(--t1)">${umkm.businesses}</div>
+              </div>
+              <div style="background:rgba(181,168,130,.1);border-radius:4px;padding:6px;text-align:center">
+                <div style="color:var(--t3);margin-bottom:2px">Unit UMKM</div>
+                <div style="font-weight:700;color:var(--sage)">${Math.round(umkm.businesses * 1.3)}</div>
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      
+      html += `</div>`;
+      
+      html += `
+        <div style="background:rgba(181,168,130,.05);border:1px solid rgba(181,168,130,.15);border-radius:10px;padding:14px;margin-top:16px">
+          <h4 style="font-size:12px;font-weight:700;color:var(--sage);margin-bottom:10px">💡 Rekomendasi Integrasi</h4>
+          <ul style="font-size:10.5px;color:var(--t2);line-height:1.6;padding-left:20px">
+            <li style="margin-bottom:6px">Kolaborasi dengan UMKM lokal untuk pengadaan barang/jasa dapat mengurangi biaya hingga 15%</li>
+            <li style="margin-bottom:6px">Prioritaskan UMKM dengan score tinggi (>7.5) untuk mitra strategis pengadaan</li>
+            <li style="margin-bottom:6px">Program pelatihan dan sertifikasi untuk UMKM meningkatkan kualitas produk/layanan</li>
+            <li>Pembentukan koperasi UMKM dapat meningkatkan skala dan kapasitas produksi</li>
+          </ul>
+        </div>
+      `;
+    }
+    
+    html += `</div>`;
+    dom.modalBody.innerHTML = html;
+  }
+    const anomalies = dashboardData.anomalies || [];
+
+    if (anomalies.length === 0) {
+      dom.modalBody.innerHTML = `<div class="panel-msg" style="min-height:200px">Tidak ada anomali terdeteksi pada area ini.</div>`;
+      return;
+    }
+
+    const anomalyGroups = {
+      severity_high: anomalies.filter(a => a.anomalyType === 'severity_high'),
+      flagged: anomalies.filter(a => a.anomalyType === 'flagged'),
+      high_waste_ratio: anomalies.filter(a => a.anomalyType === 'high_waste_ratio'),
+    };
+
+    let html = `<div style="padding:0">`;
+    
+    if (anomalyGroups.severity_high.length > 0) {
+      html += `
+        <div style="margin-bottom:16px">
+          <h4 style="color:#a83c2e;margin-bottom:10px;padding:0 0 8px 0;border-bottom:2px solid rgba(168,60,46,.2)">🔴 Severity Tinggi (${anomalyGroups.severity_high.length})</h4>
+          <table class="rtbl" style="font-size:0.85em"><thead><tr><th>Paket</th><th>Pemilik</th><th>Severity</th><th>Waste</th></tr></thead><tbody>
+            ${anomalyGroups.severity_high.map(pkg => `
+              <tr style="background:rgba(168,60,46,.08)">
+                <td>${escapeHtml(pkg.packageName)}</td>
+                <td>${escapeHtml(ownerTypeLabel(pkg.ownerType))}</td>
+                <td><span style="color:#a83c2e;font-weight:bold">${severityLabel(pkg.audit.severity)}</span></td>
+                <td style="color:#d4a999">Rp ${formatCompactCurrency(pkg.audit.potensiPemborosan)}</td>
+              </tr>
+            `).join('')}
+          </tbody></table>
+        </div>
+      `;
+    }
+
+    if (anomalyGroups.flagged.length > 0) {
+      html += `
+        <div style="margin-bottom:16px">
+          <h4 style="color:#d4a999;margin-bottom:10px;padding:0 0 8px 0;border-bottom:2px solid rgba(212,169,153,.2)">⚠️ Flagged/Mencurigakan (${anomalyGroups.flagged.length})</h4>
+          <table class="rtbl" style="font-size:0.85em"><thead><tr><th>Paket</th><th>Pemilik</th><th>Waste</th></tr></thead><tbody>
+            ${anomalyGroups.flagged.map(pkg => `
+              <tr style="background:rgba(212,169,153,.08)">
+                <td>${escapeHtml(pkg.packageName)}</td>
+                <td>${escapeHtml(ownerTypeLabel(pkg.ownerType))}</td>
+                <td style="color:#d4a999">Rp ${formatCompactCurrency(pkg.audit.potensiPemborosan)}</td>
+              </tr>
+            `).join('')}
+          </tbody></table>
+        </div>
+      `;
+    }
+
+    if (anomalyGroups.high_waste_ratio.length > 0) {
+      html += `
+        <div style="margin-bottom:16px">
+          <h4 style="color:#8b7332;margin-bottom:10px;padding:0 0 8px 0;border-bottom:2px solid rgba(139,115,50,.2)">📊 Ratio Waste Tinggi (${anomalyGroups.high_waste_ratio.length})</h4>
+          <table class="rtbl" style="font-size:0.85em"><thead><tr><th>Paket</th><th>Budget</th><th>Waste</th><th>Ratio</th></tr></thead><tbody>
+            ${anomalyGroups.high_waste_ratio.map(pkg => {
+              const ratio = pkg.meta.potensiPemborosan ? Math.round((pkg.audit.potensiPemborosan / pkg.budget) * 100) : 0;
+              return `
+                <tr style="background:rgba(139,115,50,.08)">
+                  <td>${escapeHtml(pkg.packageName)}</td>
+                  <td style="font-family:'JetBrains Mono',monospace;font-size:0.8em">Rp ${formatCompactCurrency(pkg.budget)}</td>
+                  <td style="color:#d4a999">Rp ${formatCompactCurrency(pkg.audit.potensiPemborosan)}</td>
+                  <td style="color:#8b7332;font-weight:bold">${ratio}%</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody></table>
+        </div>
+      `;
+    }
+
+    html += `</div>`;
+    dom.modalBody.innerHTML = html;
+  }
+
+  async function loadDashboard(regionKey, tabType = 'dashboard') {
+    if (!regionKey) return;
+
+    state.modalRequestId += 1;
+    const requestId = state.modalRequestId;
+
+    try {
+      const dashboardData = await fetchJson(`/regions/${encodeURIComponent(regionKey)}/dashboard`);
+      if (requestId !== state.modalRequestId) return;
+      
+      if (tabType === 'anomalies') {
+        renderAnomalyTab(dashboardData);
+      } else {
+        renderDashboardCharts(dashboardData);
+      }
+    } catch (error) {
+      if (requestId !== state.modalRequestId) return;
+      renderModalState("Gagal memuat dashboard", formatFetchError(error), true);
+    }
+  }
+
+  function renderModalTabs(activeTab) {
+    const tabsHtml = `
+      <button class="modal-tab ${activeTab === 'dashboard' ? 'active' : ''}" onclick="dashboardActions.switchModalTab('dashboard')">📊 Dashboard</button>
+      <button class="modal-tab ${activeTab === 'anomalies' ? 'active' : ''}" onclick="dashboardActions.switchModalTab('anomalies')">🚨 Anomali</button>
+      <button class="modal-tab ${activeTab === 'packages' ? 'active' : ''}" onclick="dashboardActions.switchModalTab('packages')">📋 Paket</button>
+    `;
+    const tabsContainer = document.getElementById('modalTabs');
+    if (tabsContainer) {
+      tabsContainer.innerHTML = tabsHtml;
+    }
+  }
+
+  function switchModalTab(tab) {
+    state.modal.activeTab = tab;
+    if (state.modal.areaType === 'region') {
+      if (tab === 'dashboard') {
+        loadDashboard(state.modal.areaKey);
+        renderModalTabs('dashboard');
+      } else if (tab === 'anomalies') {
+        loadDashboard(state.modal.areaKey, 'anomalies');
+        renderModalTabs('anomalies');
+      } else {
+        loadAreaPackages();
+        renderModalTabs('packages');
+      }
+    } else {
+      loadAreaPackages();
+      renderModalTabs('packages');
+    }
+  }
+
   async function loadAreaPackages() {
     if (
       (state.modal.areaType === "owner" && (!state.modal.ownerType || !state.modal.ownerName)) ||
@@ -1193,13 +1519,17 @@
       ownerType: "",
       severity: "",
       priorityOnly: false,
+      activeTab: "dashboard",
     };
 
     refreshMapStyles();
+    renderGeoLayer(false);
+    fitMapToArea(areaKey);
     renderSidebarContent();
     dom.modal.classList.add("open");
     document.body.style.overflow = "hidden";
-    loadAreaPackages();
+    renderModalTabs("dashboard");
+    loadDashboard(areaKey);
   }
 
   function openOwnerModal(ownerName, ownerType) {
@@ -1227,6 +1557,7 @@
 
   function closeRegionModal() {
     state.modalRequestId += 1;
+    state.selectedAreaKey = null;
     state.modal = {
       areaType: currentAreaType(),
       areaKey: null,
@@ -1240,6 +1571,10 @@
     };
     dom.modal.classList.remove("open");
     document.body.style.overflow = "";
+    refreshMapStyles();
+    if (typeof AuditMap.fitBounds === "function") {
+      AuditMap.fitBounds(getActiveGeo());
+    }
   }
 
   function setSearch(value) {
@@ -1403,6 +1738,7 @@
     setSearch,
     setSort,
     setTab,
+    switchModalTab,
   };
 
   bindEvents();
